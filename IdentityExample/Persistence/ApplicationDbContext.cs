@@ -7,7 +7,7 @@ namespace IdentityExample.Persistence;
 public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options)
     : IdentityDbContext<IdentityUser>(options)
 {
-    public DbSet<AspNetClaims> AspNetClaims => Set<AspNetClaims>();
+    public DbSet<AspNetClaims> Claims => Set<AspNetClaims>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
