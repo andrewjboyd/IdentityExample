@@ -2,6 +2,7 @@ using IdentityExample.Persistence;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi;
+using System.Security.Claims;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -151,12 +152,49 @@ app.MapGet("/claims", async (ApplicationDbContext dbContext, CancellationToken c
     })
     .RequireAuthorization();
 
+app.MapPost("/users/{userId}/claims", async (string userId, PostUserClaimsRequest request, CancellationToken cancellationToken, ApplicationDbContext dbContext) =>
+    {
+        var user = await dbContext.Users.FirstOrDefaultAsync(u => u.Id == userId);
+        if (user is null)
+        {
+            return Results.NotFound("User not found");
+        }
+
+        var existingClaims = await dbContext.UserClaims
+            .Where(c => c.UserId == userId)
+            .ToListAsync(cancellationToken);
+
+        var claimsToRemove = existingClaims
+            .Where(c => !request.Roles.Contains(c.ClaimValue!))
+            .ToList();
+
+        dbContext.UserClaims.RemoveRange(claimsToRemove);
+
+        var claimsToAdd = request.Roles
+            .Where(roleValue => !existingClaims.Any(c => c.ClaimValue == roleValue))
+            .Select(roleValue => new IdentityUserClaim<string>
+            {
+                UserId = userId,
+                ClaimType = ClaimTypes.Role,
+                ClaimValue = roleValue
+            })
+            .ToList();
+
+        await dbContext.UserClaims.AddRangeAsync(claimsToAdd);
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        return Results.Ok();
+    })
+    .RequireAuthorization()
+    .Produces(404)
+    .Produces(200);
 
 app.Run();
 
 // Request/Response DTOs
 public record SignUpRequest(string Email, string Password);
 public record SignInRequest(string Email, string Password);
+public record PostUserClaimsRequest(string[] Roles);
 
 public record UserResponse(string Id, string UserName, string Email);
 
