@@ -127,7 +127,7 @@ app.MapGet("/users", async (ApplicationDbContext dbContext, CancellationToken ca
 
 app.MapGet("/users/{userId}/claims", async (string userId, ApplicationDbContext dbContext, CancellationToken cancellationToken) =>
     {
-        var user = await dbContext.Users.FirstOrDefaultAsync(u => u.Id == userId);
+        var user = await dbContext.Users.FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
         if (user is null)
         {
             return Results.NotFound();
@@ -146,37 +146,47 @@ app.MapGet("/users/{userId}/claims", async (string userId, ApplicationDbContext 
 app.MapGet("/claims", async (ApplicationDbContext dbContext, CancellationToken cancellationToken) =>
     {
         var claims = await dbContext.Claims
+            .Select(c => c.ClaimValue)
             .ToListAsync(cancellationToken);
 
-        return claims;
+        return Results.Ok(claims);
     })
     .RequireAuthorization();
 
 app.MapPost("/users/{userId}/claims", async (string userId, PostUserClaimsRequest request, CancellationToken cancellationToken, ApplicationDbContext dbContext) =>
     {
-        var user = await dbContext.Users.FirstOrDefaultAsync(u => u.Id == userId);
+        var user = await dbContext.Users.FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
         if (user is null)
         {
             return Results.NotFound("User not found");
         }
 
-        var existingClaims = await dbContext.UserClaims
+        var avilableClaims = await dbContext.Claims
+            .Where(c => request.Claims.Contains(c.ClaimValue!))
+            .Select(c => c.ClaimValue!)
+            .ToListAsync(cancellationToken);
+        if (avilableClaims.Count != request.Claims.Length)
+        {
+            return Results.BadRequest("One or more claims are invalid");
+        }
+
+        var existingUserClaims = await dbContext.UserClaims
             .Where(c => c.UserId == userId)
             .ToListAsync(cancellationToken);
 
-        var claimsToRemove = existingClaims
-            .Where(c => !request.Roles.Contains(c.ClaimValue!))
+        var claimsToRemove = existingUserClaims
+            .Where(c => !request.Claims.Contains(c.ClaimValue!, StringComparer.OrdinalIgnoreCase))
             .ToList();
 
         dbContext.UserClaims.RemoveRange(claimsToRemove);
 
-        var claimsToAdd = request.Roles
-            .Where(roleValue => !existingClaims.Any(c => c.ClaimValue == roleValue))
-            .Select(roleValue => new IdentityUserClaim<string>
+        var claimsToAdd = request.Claims
+            .Where(claimValue => !existingUserClaims.Any(c => c.ClaimValue!.Equals(claimValue, StringComparison.OrdinalIgnoreCase)))
+            .Select(claimValue => new IdentityUserClaim<string>
             {
                 UserId = userId,
                 ClaimType = ClaimTypes.Role,
-                ClaimValue = roleValue
+                ClaimValue = claimValue,
             })
             .ToList();
 
@@ -187,14 +197,185 @@ app.MapPost("/users/{userId}/claims", async (string userId, PostUserClaimsReques
     })
     .RequireAuthorization()
     .Produces(404)
+    .Produces(400)
     .Produces(200);
+
+app.MapGet("/roles", async (ApplicationDbContext dbContext, CancellationToken cancellationToken) =>
+    {
+        var roles = await dbContext.Roles
+            .ToListAsync(cancellationToken);
+        return Results.Ok(roles);
+    })
+    .RequireAuthorization();
+
+app.MapPost("/roles", async (PostRoleCreate request, ApplicationDbContext dbContext, CancellationToken cancellationToken) =>
+    {
+        var existingRole = await dbContext.Roles
+            .FirstOrDefaultAsync(r => r.Name == request.RoleName, cancellationToken);
+        if (existingRole is not null)
+        {
+            return Results.BadRequest("Role with the same name already exists");
+        }
+
+        var avilableClaims = await dbContext.Claims
+            .Where(c => request.Claims.Contains(c.ClaimValue!))
+            .Select(c => c.ClaimValue!)
+            .ToListAsync(cancellationToken);
+        if (avilableClaims.Count != request.Claims.Length)
+        {
+            return Results.BadRequest("One or more claims are invalid");
+        }
+
+        var newRole = new IdentityRole
+        {
+            Id = Guid.CreateVersion7().ToString(),
+            Name = request.RoleName,
+        };
+        await dbContext.Roles.AddAsync(newRole, cancellationToken);
+
+        await dbContext.RoleClaims.AddRangeAsync(request.Claims.Select(claimValue => new IdentityRoleClaim<string>
+        {
+            RoleId = newRole.Id,
+            ClaimType = ClaimTypes.Role,
+            ClaimValue = claimValue,
+        }), cancellationToken);
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return Results.Ok(newRole);
+    })
+    .RequireAuthorization()
+    .Produces(400)
+    .Produces<IdentityRole>(200);
+
+app.MapPost("/roles/{roleId}", async (string roleId, PostRoleUpdate request, ApplicationDbContext dbContext, CancellationToken cancellationToken) =>
+    {
+        if (!roleId.Equals(request.Id, StringComparison.OrdinalIgnoreCase))
+        {
+            return Results.BadRequest("Role ID in path and body do not match");
+        }
+
+        var avilableClaims = await dbContext.Claims
+            .Where(c => request.Claims.Contains(c.ClaimValue!))
+            .Select(c => c.ClaimValue!)
+            .ToListAsync(cancellationToken);
+        if (avilableClaims.Count != request.Claims.Length)
+        {
+            return Results.BadRequest("One or more claims are invalid");
+        }
+
+        var existingRole = await dbContext.Roles
+            .FirstOrDefaultAsync(r => r.Id == roleId, cancellationToken);
+        if (existingRole is null)
+        {
+            return Results.NotFound("Role not found");
+        }
+
+        existingRole.Name = request.RoleName;
+
+        var existingRoleClaims = await dbContext.RoleClaims
+            .Where(c => c.RoleId == roleId)
+            .ToListAsync(cancellationToken);
+
+        var claimsToRemove = existingRoleClaims
+            .Where(c => !request.Claims.Contains(c.ClaimValue!, StringComparer.OrdinalIgnoreCase))
+            .ToList();
+        dbContext.RoleClaims.RemoveRange(claimsToRemove);
+
+        var claimsToAdd = request.Claims
+            .Where(claimValue => !existingRoleClaims.Any(c => c.ClaimValue!.Equals(claimValue, StringComparison.OrdinalIgnoreCase)))
+            .Select(claimValue => new IdentityRoleClaim<string>
+            {
+                RoleId = roleId,
+                ClaimType = ClaimTypes.Role,
+                ClaimValue = claimValue,
+            })
+            .ToList();
+        await dbContext.RoleClaims.AddRangeAsync(claimsToAdd);
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        return Results.Ok(existingRole);
+    })
+    .RequireAuthorization()
+    .Produces(400)
+    .Produces(404)
+    .Produces(200);
+
+app.MapGet("/users/{userId}/roles", async (string userId, CancellationToken cancellationToken, ApplicationDbContext dbContext) =>
+    {
+        var user = await dbContext.Users.FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
+        if (user is null)
+        {
+            return Results.NotFound("User not found");
+        }
+
+        var userRoles = await dbContext.UserRoles
+            .Where(u => u.UserId == userId)
+            .Select(u => u.RoleId)
+            .ToArrayAsync(cancellationToken);
+
+        return Results.Ok(userRoles);
+    })
+    .RequireAuthorization()
+    .Produces(404)
+    .Produces<int[]>(200);
+
+app.MapPost("/users/{userId}/roles", async (string userId, PostUserRolesRequest request, CancellationToken cancellationToken, ApplicationDbContext dbContext) =>
+{
+    var user = await dbContext.Users.FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
+    if (user is null)
+    {
+        return Results.NotFound("User not found");
+    }
+
+    var availableRoles = await dbContext.Roles
+        .Where(r => request.RoleIds.Contains(r.Id!))
+        .ToArrayAsync(cancellationToken);
+    if (availableRoles.Length != request.RoleIds.Length)
+    {
+        return Results.BadRequest("One or more roles are invalid");
+    }
+
+    var existingUserRoles = await dbContext.UserRoles
+        .Where(c => c.UserId == userId)
+        .ToListAsync(cancellationToken);
+
+    var rolesToRemove = existingUserRoles
+        .Where(c => !request.RoleIds.Contains(c.RoleId!, StringComparer.OrdinalIgnoreCase))
+        .ToList();
+
+    dbContext.UserRoles.RemoveRange(rolesToRemove);
+
+    var userRolesToAdd = request.RoleIds
+        .Where(roleValue => !existingUserRoles.Any(c => c.RoleId!.Equals(roleValue, StringComparison.OrdinalIgnoreCase)))
+        .Select(roleId => new IdentityUserRole<string>
+        {
+            UserId = userId,
+            RoleId = roleId,
+        })
+        .ToList();
+
+    await dbContext.UserRoles.AddRangeAsync(userRolesToAdd);
+    await dbContext.SaveChangesAsync(cancellationToken);
+
+    return Results.Ok();
+})
+.RequireAuthorization()
+.Produces(404)
+.Produces<string[]>(400)
+.Produces(200);
 
 app.Run();
 
 // Request/Response DTOs
 public record SignUpRequest(string Email, string Password);
 public record SignInRequest(string Email, string Password);
-public record PostUserClaimsRequest(string[] Roles);
+public record PostUserClaimsRequest(string[] Claims);
+public record PostUserRolesRequest(string[] RoleIds);
+
+public record PostRoleCreate(string RoleName, string[] Claims);
+
+public record PostRoleUpdate(string Id, string RoleName, string[] Claims);
 
 public record UserResponse(string Id, string UserName, string Email);
 

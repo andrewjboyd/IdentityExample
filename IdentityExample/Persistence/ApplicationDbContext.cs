@@ -17,6 +17,11 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
         modelBuilder.Entity<AspNetClaims>().HasData(GetAspNetClaimsSeedData());
     }
 
+    protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
+    {
+        configurationBuilder.Properties<string>().UseCollation("NOCASE");
+    }
+
     private static AspNetClaims[] GetAspNetClaimsSeedData()
     {
         var functions = new[] { "customer", "order", "product", "user", "report", "admin", "invoice", "payment", "inventory", "analytics" };
